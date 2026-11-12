@@ -15,7 +15,7 @@ duplicate the schema.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
@@ -26,6 +26,7 @@ class SourceType(str, Enum):
     TEAMS = "teams"
     ZOOM = "zoom"
     GOOGLE_MEET = "google_meet"
+    TEAMS_MEETING = "teams_meeting"
     MANUAL = "manual"
 
 
@@ -55,7 +56,7 @@ class ChunkPayload:
     author_display_name: str = ""
     speaker_label: Optional[str] = None       # diarization label, meetings only ("Speaker 2")
 
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     thread_id: Optional[str] = None           # Slack thread_ts / Teams reply chain id
     meeting_id: Optional[str] = None
     meeting_timestamp_offset_s: Optional[float] = None  # seconds into the call, meetings only
