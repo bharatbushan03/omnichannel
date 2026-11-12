@@ -54,16 +54,22 @@ class IngestionPipeline:
             logger.debug("Dropped casual message from %s", author_id)
             return
 
-        redaction = self.redactor.redact(text)
+        redaction = self._redact_or_drop(text, author_id)
+        if redaction is None:
+            return
         extraction = self.extractor.extract(redaction.redacted_text)
 
         # Write graph entities/relations
         entity_ids = []
         for entity in extraction.entities:
-            self.graph_store.merge_entity(entity.id, entity.type, entity.name, workspace_id)
+            self.graph_store.merge_entity(
+                entity.id, entity.type, entity.name, workspace_id, channel_id=channel_id
+            )
             entity_ids.append(entity.id)
         for relation in extraction.relations:
-            self.graph_store.merge_relation(relation.source_id, relation.relation, relation.target_id)
+            self.graph_store.merge_relation(
+                relation.source_id, relation.relation, relation.target_id, workspace_id
+            )
 
         # Chunk + embed + write to vector store
         chunks = chunk_text(redaction.redacted_text)
@@ -109,15 +115,21 @@ class IngestionPipeline:
         if not classification.keep:
             return
 
-        redaction = self.redactor.redact(text)
+        redaction = self._redact_or_drop(text, speaker_label)
+        if redaction is None:
+            return
         extraction = self.extractor.extract(redaction.redacted_text)
 
         entity_ids = []
         for entity in extraction.entities:
-            self.graph_store.merge_entity(entity.id, entity.type, entity.name, workspace_id)
+            self.graph_store.merge_entity(
+                entity.id, entity.type, entity.name, workspace_id, channel_id=meeting_id
+            )
             entity_ids.append(entity.id)
         for relation in extraction.relations:
-            self.graph_store.merge_relation(relation.source_id, relation.relation, relation.target_id)
+            self.graph_store.merge_relation(
+                relation.source_id, relation.relation, relation.target_id, workspace_id
+            )
 
         chunks = chunk_text(redaction.redacted_text)
         embeddings = self.embedder.embed_passages([c.text for c in chunks])  # "passage" mode — stored text
@@ -141,6 +153,14 @@ class IngestionPipeline:
             self.vector_store.upsert_chunk(embedding, payload)
 
         logger.info("Ingested meeting segment from %s in %s", speaker_label, meeting_title)
+
+    def _redact_or_drop(self, text: str, subject: str):
+        """Fail closed: a redaction error drops the message instead of storing raw text."""
+        try:
+            return self.redactor.redact(text)
+        except Exception:
+            logger.exception("PII redaction failed; dropping content from %s", subject)
+            return None
 
 
 async def _smoke_test() -> None:
