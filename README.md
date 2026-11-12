@@ -2,7 +2,9 @@
 
 A scaffold for an AI assistant that passively ingests knowledge from Slack/Teams
 chat and Zoom/Meet calls, stores it in a hybrid vector + graph knowledge base,
-and answers questions via text and low-latency voice.
+and answers questions in chat (Slack, Teams, Zoom, Google Meet, Discord, Jira,
+WhatsApp) and by voice. The text agent can also read the workspace repo, recent
+git history, and Jira issues. Those tools are read-only.
 
 **LLM/embedding provider: NVIDIA NIM (free tier).** All classification, entity
 extraction, embedding, and voice-agent reasoning run on NVIDIA's free
@@ -74,15 +76,30 @@ ingestion/
   storage_clients.py           Qdrant / Neo4j / Postgres client wrappers
   hybrid_retrieval.py          RRF fusion + graph traversal + context assembly
   pipeline.py                  Orchestrates classify -> redact -> extract -> embed -> store
-  slack_listener.py            FastAPI webhook for Slack Events API (message.channels, app_mention)
-  meeting_listener.py          Recall.ai bot dispatch + transcript webhook receiver (Zoom/Meet)
+  slack_listener.py            Slack Events webhook; replies to app mentions and DMs
+  teams_listener.py            Teams message webhook; replies to personal chats, @mentions, and "knowledge agent"
+  meeting_listener.py          Recall.ai bot for Zoom, Google Meet, and Teams meetings; replies in meeting chat
+  rate_limit.py                Per-process sliding window for the webhook routes
+  retention.py                 TTL purge for chunks, meeting transcripts, and audit logs
+agent_runtime/
+  addressing.py                Which messages are questions for the agent
+  dev_tools.py                 Read-only repo search, file read, git log, and Jira lookup
+  runner.py                    NVIDIA tool-calling turn shared by every text channel
+  outbound.py                  Posts the reply back to Slack, Teams, Recall, Discord, WhatsApp, or Jira
+channels/
+  gateway.py                   Discord /ask, WhatsApp, and Jira comment webhooks
+  signatures.py                Discord ed25519 and WhatsApp/Jira sha256 checks
 voice_agent/
   agent.py                     LiveKit Agents entrypoint — Deepgram STT -> Nemotron (tool-calling) -> Cartesia TTS
   kb_tool.py                   The `lookup_knowledge_base` function tool called mid-conversation
+  scope.py                     Room-metadata parsing (workspace, users, shared channel scope)
 security/
-  pii_redaction.py             Regex-based PII redaction (+ optional LLM pass hook)
-  governance.md                Full security/governance strategy, including known gaps
-tests/                         Unit tests for RRF fusion and PII redaction (9/9 passing)
+  pii_redaction.py             Regex PII redaction + optional LLM pass (fail closed)
+  webhook_signature.py         Slack-style HMAC and Recall.ai Standard Webhooks verification
+  consent.py                   Jurisdiction rules and objection handling for meetings
+  encryption.py                Production gate for disk / managed encryption at rest
+  governance.md                Security/governance strategy and the controls that implement it
+tests/                         Unit tests for RRF, PII, signatures, consent, retention, and audit
 docker-compose.yml             Local Qdrant + Neo4j + Postgres for development
 requirements.txt
 .env.example
@@ -118,16 +135,39 @@ uvicorn ingestion.slack_listener:app --port 8001
 # Meeting (Zoom/Meet) ingestion webhook
 uvicorn ingestion.meeting_listener:app --port 8002
 
+# Teams ingestion webhook
+uvicorn ingestion.teams_listener:app --port 8003
+
+# Discord, WhatsApp, and Jira agent webhooks
+uvicorn channels.gateway:app --port 8010
+
 # Voice agent worker (connects to LiveKit Cloud/self-hosted)
 python -m voice_agent.agent dev
+
+# Delete chunks, meeting transcripts, and audit rows past their TTL
+python -m ingestion.retention
 ```
 
 ## Before production
 
-Read `security/governance.md` §6 ("Known gaps to close") — it lists specific
-unfinished items: fail-closed redaction error handling, real Recall.ai webhook
-signature verification, audit log write-through, jurisdiction-aware meeting
-consent, rate limiting, encryption-at-rest, and data retention policy. None of
-these are optional for a real enterprise deployment. Separately, swap off the
-NVIDIA free tier before production — a shared rate-limited endpoint is not
-appropriate for a live enterprise workload.
+Replies go out only when the message is addressed to the agent. Slack answers
+app mentions and direct messages. Teams answers a personal chat, an @mention,
+or a message that says "knowledge agent". Zoom, Google Meet, and Teams
+meetings answer that same wake phrase in the meeting chat, after the recording
+disclosure, and stay silent on the disclosure itself. Discord answers `/ask`.
+WhatsApp answers inbound text. Jira answers a comment that names the knowledge
+agent, and skips comments posted by `JIRA_BOT_ACCOUNT_ID`. Every reply can call
+the knowledge base plus read-only repo, git, and Jira tools. The workspace id
+comes from the channel event.
+
+The controls in `security/governance.md` §6 are implemented: fail-closed
+redaction, Recall.ai signature verification, retrieval audit write-through,
+jurisdiction-aware meeting consent, webhook rate limits, an encryption-at-rest
+startup gate, and `python -m ingestion.retention`.
+
+What is still an operator step, not more application code: have counsel set
+`MEETING_JURISDICTION`, sync `channel_acl` from Slack/Teams membership, put
+Postgres/Neo4j/Qdrant on encrypted disks or managed TDE (`ENCRYPTION_AT_REST=disk`
+or `managed`, required when `APP_ENV=production`), schedule the retention job,
+and leave the NVIDIA free tier before any real workload. A shared rate-limited
+endpoint is not appropriate for live enterprise traffic.

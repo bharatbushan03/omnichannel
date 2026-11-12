@@ -1,3 +1,7 @@
+# Local Qdrant, Neo4j, and Postgres. These images do not encrypt data files.
+# Put this Docker data root on an encrypted disk (BitLocker on Windows) before
+# treating the volumes as safe for real workspace data. In production, use a
+# managed service with transparent data encryption and set ENCRYPTION_AT_REST=managed.
 version: "3.8"
 
 services:
