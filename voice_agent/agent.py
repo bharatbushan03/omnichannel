@@ -43,10 +43,10 @@ from livekit.agents import (
     cli,
     function_tool,
 )
-from livekit.plugins import cartesia, deepgram, openai as lk_openai, silero
 
 from dotenv import load_dotenv
 
+from agent_runtime.runner import TurnContext, execute_tool
 from ingestion.nvidia_client import DEFAULT_CHAT_MODEL, NVIDIA_BASE_URL
 from security.consent import DISCLOSURE_TEXT
 from security.encryption import require_encryption_at_rest
@@ -62,13 +62,14 @@ AGENT_INSTRUCTIONS = """You are an enterprise Knowledge Agent joining a live \
 voice call to help the team with technical/operational questions.
 
 Rules:
-- Call `lookup_knowledge_base` ONLY when the user asks something that plausibly
-  has an answer in past team decisions, debug logs, schedules, or docs.
-  Do not call it for greetings, small talk, or questions you can answer directly.
-- When you do use retrieved context, cite the source channel/meeting and
-  timestamp briefly (e.g. "per #eng-payments last Tuesday...").
-- If the knowledge base has no relevant results, say so plainly — do not
-  fabricate an answer.
+- Call lookup_knowledge_base when the question is about past team decisions, \
+incidents, meetings, or docs. Skip it for greetings and small talk.
+- For code questions, call the development tools: list_repository, \
+search_repository, read_repository_file, git_status, git_diff, git_log, \
+git_show, and run_tests. For tracked work, call jira_get_issue or jira_search. \
+These tools are read-only.
+- Cite the source channel, file, or commit when you use a tool result.
+- If a tool returns nothing useful, say so. Do not invent an answer.
 - Keep responses concise. This is a live voice conversation, not a document.
 """
 
@@ -76,6 +77,8 @@ Rules:
 def prewarm(proc: JobProcess) -> None:
     """Runs once per worker process before handling jobs — load heavy resources
     here so they're not paid for on every call. VAD model load + KB client init."""
+    from livekit.plugins import silero
+
     proc.userdata["vad"] = silero.VAD.load()
     init_kb_clients()
 
@@ -85,27 +88,131 @@ class KnowledgeAgent(Agent):
         super().__init__(instructions=AGENT_INSTRUCTIONS)
         self.scope = scope
 
+    def _turn(self) -> TurnContext:
+        return TurnContext(
+            channel="voice",
+            workspace_id=self.scope.workspace_id,
+            user_id=self.scope.user_id,
+            allowed_channel_ids=self.scope.allowed_channel_ids,
+        )
+
+    async def _use(self, name: str, arguments: dict) -> str:
+        async def _lookup(query: str, _ctx: TurnContext) -> str:
+            return await query_knowledge_base(
+                query=query,
+                workspace_id=self.scope.workspace_id,
+                allowed_channel_ids=self.scope.allowed_channel_ids,
+                user_id=self.scope.user_id,
+                participant_user_ids=self.scope.participant_user_ids,
+                source_interface="voice",
+            )
+
+        logger.info("Voice tool called: %s", name)
+        return await execute_tool(name, arguments, self._turn(), knowledge_lookup=_lookup)
+
     @function_tool()
     async def lookup_knowledge_base(self, context: RunContext, query: str) -> str:
-        """Search the company's internal knowledge base (Slack decisions, debug
-        logs, meeting transcripts, docs) for information relevant to `query`.
+        """Search ingested Slack, Teams, and meeting knowledge.
 
         Args:
-            query: A focused natural-language search query, e.g. "how did we
-                fix the payments-service 500 errors last week".
+            query: A focused natural-language search query.
         """
-        logger.info("KB tool called: %s", query)
-        return await query_knowledge_base(
-            query=query,
-            workspace_id=self.scope.workspace_id,
-            allowed_channel_ids=self.scope.allowed_channel_ids,
-            user_id=self.scope.user_id,
-            participant_user_ids=self.scope.participant_user_ids,
-            source_interface="voice",
-        )
+        return await self._use("lookup_knowledge_base", {"query": query})
+
+    @function_tool()
+    async def search_repository(self, context: RunContext, query: str) -> str:
+        """Search the workspace source tree for a text snippet.
+
+        Args:
+            query: The text to find.
+        """
+        return await self._use("search_repository", {"query": query})
+
+    @function_tool()
+    async def read_repository_file(self, context: RunContext, path: str, max_lines: int = 200) -> str:
+        """Read a file inside the workspace. Refuses secrets and paths outside the repo.
+
+        Args:
+            path: Workspace-relative file path.
+            max_lines: Maximum lines to return.
+        """
+        return await self._use("read_repository_file", {"path": path, "max_lines": max_lines})
+
+    @function_tool()
+    async def list_repository(self, context: RunContext, path: str = ".", limit: int = 80) -> str:
+        """List files and directories inside the workspace. Skips secrets and hidden folders.
+
+        Args:
+            path: Directory relative to the workspace. Use "." for the root.
+            limit: Maximum entries to return.
+        """
+        return await self._use("list_repository", {"path": path, "limit": limit})
+
+    @function_tool()
+    async def git_status(self, context: RunContext) -> str:
+        """Show the branch and uncommitted files in the workspace."""
+        return await self._use("git_status", {})
+
+    @function_tool()
+    async def git_diff(self, context: RunContext, path: str = "", staged: bool = False) -> str:
+        """Show the uncommitted diff.
+
+        Args:
+            path: Optional file to limit the diff to.
+            staged: When true, show the index instead of the working tree.
+        """
+        return await self._use("git_diff", {"path": path, "staged": staged})
+
+    @function_tool()
+    async def git_log(self, context: RunContext, limit: int = 10, path: str = "") -> str:
+        """Show recent commit subjects.
+
+        Args:
+            limit: How many commits to show.
+            path: Optional file to limit the history to.
+        """
+        return await self._use("git_log", {"limit": limit, "path": path})
+
+    @function_tool()
+    async def git_show(self, context: RunContext, revision: str) -> str:
+        """Show one commit's subject and diffstat.
+
+        Args:
+            revision: A commit hash or branch name.
+        """
+        return await self._use("git_show", {"revision": revision})
+
+    @function_tool()
+    async def run_tests(self, context: RunContext, path: str = "") -> str:
+        """Run pytest for the workspace, or for one Python file or directory inside it.
+
+        Args:
+            path: Optional test file or directory. Empty runs the default suite.
+        """
+        return await self._use("run_tests", {"path": path})
+
+    @function_tool()
+    async def jira_get_issue(self, context: RunContext, issue_key: str) -> str:
+        """Read one Jira issue by key.
+
+        Args:
+            issue_key: An issue key such as PAY-12.
+        """
+        return await self._use("jira_get_issue", {"issue_key": issue_key})
+
+    @function_tool()
+    async def jira_search(self, context: RunContext, jql: str) -> str:
+        """Run a read-only JQL search.
+
+        Args:
+            jql: The JQL query.
+        """
+        return await self._use("jira_search", {"jql": jql})
 
 
 async def entrypoint(ctx: JobContext) -> None:
+    from livekit.plugins import cartesia, deepgram, openai as lk_openai
+
     require_encryption_at_rest()
     await ctx.connect()
 

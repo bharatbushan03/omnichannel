@@ -1,4 +1,4 @@
-"""Tool-calling turn for every text channel and for in-meeting chat.
+"""Tool-calling turn for every text channel, meeting chat, and the voice agent.
 
 The model may call the knowledge base and the read-only development tools.
 Workspace id is taken from the channel event, not from the model, so a prompt
@@ -13,10 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_runtime.dev_tools import (
+    git_diff,
     git_log,
+    git_show,
+    git_status,
     jira_get_issue,
     jira_search,
+    list_repository,
     read_repository_file,
+    run_tests,
     search_repository,
     workspace_root,
 )
@@ -30,8 +35,10 @@ Slack, Microsoft Teams, Zoom, Google Meet, Discord, Jira, and WhatsApp.
 Rules:
 - Call lookup_knowledge_base when the question is about past team decisions, \
 incidents, meetings, or docs. The workspace is already scoped for you.
-- Call the repository, git, and Jira tools only for questions about the current \
-codebase or tracked issues. These tools are read-only.
+- For code questions, use the development tools: list_repository, \
+search_repository, read_repository_file, git_status, git_diff, git_log, \
+git_show, and run_tests. For tracked work, use jira_get_issue or jira_search. \
+These tools are read-only.
 - Cite the source channel or file when you use a tool result.
 - If a tool returns nothing useful, say so. Do not invent an answer.
 - Keep the reply short enough to post in chat.
@@ -80,6 +87,42 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_repository",
+            "description": "List files and directories inside the workspace. Skips secrets and hidden folders.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Show the branch and uncommitted files in the workspace.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "Show the uncommitted diff. Set staged true for the index.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "staged": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "git_log",
             "description": "Show recent commit subjects. Optionally limit to one workspace path.",
             "parameters": {
@@ -88,6 +131,29 @@ TOOL_SCHEMAS = [
                     "limit": {"type": "integer"},
                     "path": {"type": "string"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_show",
+            "description": "Show one commit's subject and diffstat. Pass a hash or branch name.",
+            "parameters": {
+                "type": "object",
+                "properties": {"revision": {"type": "string"}},
+                "required": ["revision"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": "Run pytest for the workspace, or for one Python file or directory inside it.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
             },
         },
     },
@@ -199,6 +265,28 @@ async def execute_tool(name: str, arguments: dict, ctx: TurnContext, *, knowledg
                     )
                 )
             )
+        if name == "list_repository":
+            return _clip(
+                _redact(
+                    list_repository(
+                        root,
+                        path=str(arguments.get("path") or "."),
+                        limit=int(arguments.get("limit") or 80),
+                    )
+                )
+            )
+        if name == "git_status":
+            return _clip(_redact(git_status(root)))
+        if name == "git_diff":
+            return _clip(
+                _redact(
+                    git_diff(
+                        root,
+                        path=arguments.get("path"),
+                        staged=bool(arguments.get("staged")),
+                    )
+                )
+            )
         if name == "git_log":
             return _clip(
                 _redact(
@@ -209,6 +297,10 @@ async def execute_tool(name: str, arguments: dict, ctx: TurnContext, *, knowledg
                     )
                 )
             )
+        if name == "git_show":
+            return _clip(_redact(git_show(root, str(arguments.get("revision") or ""))))
+        if name == "run_tests":
+            return _clip(_redact(run_tests(root, arguments.get("path"))))
         if name == "jira_get_issue":
             return _clip(_redact(jira_get_issue(str(arguments.get("issue_key") or ""))))
         if name == "jira_search":

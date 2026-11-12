@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -18,8 +19,17 @@ from agent_runtime.addressing import (
     slack_should_answer,
     teams_should_answer,
 )
-from agent_runtime.dev_tools import git_log, read_repository_file, search_repository
-from agent_runtime.runner import TurnContext, run_agent_turn
+from agent_runtime.dev_tools import (
+    git_diff,
+    git_log,
+    git_show,
+    git_status,
+    list_repository,
+    read_repository_file,
+    run_tests,
+    search_repository,
+)
+from agent_runtime.runner import TOOL_SCHEMAS, TurnContext, execute_tool, run_agent_turn
 from ingestion.rate_limit import SlidingWindowRateLimiter
 from security.consent import DISCLOSURE_TEXT, Jurisdiction, MeetingConsentTracker
 from tests.test_webhooks import _recall_headers, _slack_headers
@@ -52,6 +62,79 @@ def test_repository_tools_stay_inside_the_workspace(tmp_path):
         assert git_log(tmp_path, path="../outside-agent-test.txt") == "Path is outside the workspace."
     finally:
         outside.unlink(missing_ok=True)
+
+
+def test_every_development_tool_is_offered_to_the_model():
+    names = {item["function"]["name"] for item in TOOL_SCHEMAS}
+    assert names == {
+        "lookup_knowledge_base",
+        "search_repository",
+        "read_repository_file",
+        "list_repository",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_show",
+        "run_tests",
+        "jira_get_issue",
+        "jira_search",
+    }
+
+
+def test_development_tools_list_diff_show_and_run(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "notes.txt").write_text("hello\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET\n", encoding="utf-8")
+    (tmp_path / "test_sample.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    listing = list_repository(tmp_path)
+    assert "pkg/" in listing
+    assert "test_sample.py" in listing
+    assert ".env" not in listing
+    assert git_show(tmp_path, "--all") == "Revision is not valid."
+    assert git_show(tmp_path, "HEAD..main") == "Revision is not valid."
+    assert git_diff(tmp_path, "../outside") == "Path is outside the workspace."
+    assert run_tests(tmp_path, "../test_sample.py") == "Path is outside the workspace."
+    assert run_tests(tmp_path, "pkg/notes.txt") == "Tests must be a directory or a Python file."
+    assert "1 passed" in run_tests(tmp_path, "test_sample.py")
+    assert "not a git repository" in git_status(tmp_path).lower()
+
+    shown = git_show(Path.cwd(), "HEAD")
+    assert shown != "Revision is not valid."
+    assert shown.split()[0]
+
+
+def test_voice_agent_exposes_the_same_development_tools():
+    from livekit.agents.llm.tool_context import find_function_tools
+
+    from voice_agent.agent import KnowledgeAgent
+
+    voice_names = {tool.info.name for tool in find_function_tools(KnowledgeAgent)}
+    text_names = {item["function"]["name"] for item in TOOL_SCHEMAS}
+    assert voice_names == text_names
+
+
+def test_voice_agent_lists_the_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path))
+    (tmp_path / "notes.txt").write_text("hello\n", encoding="utf-8")
+    from voice_agent.agent import KnowledgeAgent
+    from voice_agent.scope import RoomScope
+
+    agent = KnowledgeAgent(RoomScope(workspace_id="ws"))
+    listing = asyncio.run(agent._use("list_repository", {"path": "."}))
+    assert "notes.txt" in listing
+    refused = asyncio.run(agent._use("read_repository_file", {"path": ".env"}))
+    assert refused == "That file is not available to the agent."
+
+
+def test_execute_tool_runs_list_and_refuses_a_bad_revision(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello\n", encoding="utf-8")
+    turn = TurnContext(channel="slack", workspace_id="ws", workspace_root=tmp_path)
+    listing = asyncio.run(execute_tool("list_repository", {"path": "."}, turn))
+    assert "notes.txt" in listing
+    refused = asyncio.run(execute_tool("git_show", {"revision": "HEAD; rm -rf"}, turn))
+    assert refused == "Revision is not valid."
 
 
 def test_addressing_rules():

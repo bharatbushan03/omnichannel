@@ -83,7 +83,7 @@ ingestion/
   retention.py                 TTL purge for chunks, meeting transcripts, and audit logs
 agent_runtime/
   addressing.py                Which messages are questions for the agent
-  dev_tools.py                 Read-only repo search, file read, git log, and Jira lookup
+  dev_tools.py                 Read-only repo, git, pytest, and Jira tools shared by text and voice
   runner.py                    NVIDIA tool-calling turn shared by every text channel
   outbound.py                  Posts the reply back to Slack, Teams, Recall, Discord, WhatsApp, or Jira
 channels/
@@ -156,9 +156,10 @@ or a message that says "knowledge agent". Zoom, Google Meet, and Teams
 meetings answer that same wake phrase in the meeting chat, after the recording
 disclosure, and stay silent on the disclosure itself. Discord answers `/ask`.
 WhatsApp answers inbound text. Jira answers a comment that names the knowledge
-agent, and skips comments posted by `JIRA_BOT_ACCOUNT_ID`. Every reply can call
-the knowledge base plus read-only repo, git, and Jira tools. The workspace id
-comes from the channel event.
+agent, and skips comments posted by `JIRA_BOT_ACCOUNT_ID`. Every reply, including the voice agent, can call the knowledge base plus the
+read-only development tools: list and search the repo, read a file, git status,
+diff, log, and show, pytest, and Jira lookup. The workspace id comes from the
+channel event.
 
 The controls in `security/governance.md` §6 are implemented: fail-closed
 redaction, Recall.ai signature verification, retrieval audit write-through,

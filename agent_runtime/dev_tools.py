@@ -1,19 +1,21 @@
-"""Read-only development tools the channel agent can call.
+"""Read-only development tools every agent surface can call.
 
-Paths stay inside AGENT_WORKSPACE. Secret files are refused. Nothing here
-commits, pushes, or edits an issue.
+Paths stay inside AGENT_WORKSPACE. Secret files are refused. Git commands
+are argument lists, never a shell. Nothing here commits, pushes, or edits an issue.
 """
 from __future__ import annotations
 
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache"}
 _SKIP_NAMES = {".env", ".env.local", ".env.production", "credentials.json", "id_rsa", "id_ed25519"}
 _SKIP_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
 _ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+_REVISION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./^{}~@-]{0,80}$")
 
 
 def workspace_root(explicit: Path | None = None) -> Path:
@@ -89,6 +91,54 @@ def search_repository(query: str, root: Path, limit: int = 20) -> str:
     return "\n".join(hits) if hits else "No matches."
 
 
+def list_repository(root: Path, path: str = ".", limit: int = 80) -> str:
+    relative = path or "."
+    try:
+        directory = root if relative.strip() in (".", "") else resolve_inside(root, relative)
+    except PermissionError as exc:
+        return str(exc)
+    if _blocked(directory):
+        return "That directory is not available to the agent."
+    if not directory.is_dir():
+        return "Directory not found."
+    cap = max(1, min(int(limit or 80), 200))
+    names: list[str] = []
+    for child in sorted(directory.iterdir(), key=lambda item: item.name.lower()):
+        if child.name in _SKIP_DIRS or child.name.startswith(".") or _blocked(child):
+            continue
+        names.append(child.name + ("/" if child.is_dir() else ""))
+        if len(names) >= cap:
+            break
+    return "\n".join(names) if names else "(empty directory)"
+
+
+def _git(root: Path, command: list[str], timeout: int = 10) -> str:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"git failed: {exc}"
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "git failed").strip()
+        return detail[:500]
+    return completed.stdout.strip() or "(no output)"
+
+
+def _optional_path(root: Path, path: str | None) -> str | None:
+    if not path:
+        return None
+    resolved = resolve_inside(root, path)
+    if _blocked(resolved):
+        raise PermissionError("That path is not available to the agent.")
+    return resolved.relative_to(root).as_posix()
+
+
 def git_log(root: Path, limit: int = 10, path: str | None = None) -> str:
     count = max(1, min(int(limit or 10), 30))
     command = ["git", "log", f"-n{count}", "--pretty=format:%h %ad %s", "--date=short"]
@@ -113,6 +163,59 @@ def git_log(root: Path, limit: int = 10, path: str | None = None) -> str:
         detail = (completed.stderr or completed.stdout or "git log failed").strip()
         return detail[:500]
     return completed.stdout.strip() or "No commits."
+
+
+def git_status(root: Path) -> str:
+    return _git(root, ["git", "status", "--short", "--branch"])
+
+
+def git_diff(root: Path, path: str | None = None, staged: bool = False) -> str:
+    command = ["git", "diff", "--unified=1"]
+    if staged:
+        command.append("--cached")
+    try:
+        relative = _optional_path(root, path)
+    except PermissionError as exc:
+        return str(exc)
+    if relative:
+        command.extend(["--", relative])
+    return _git(root, command)
+
+
+def git_show(root: Path, revision: str) -> str:
+    rev = (revision or "").strip()
+    if ".." in rev or not _REVISION.fullmatch(rev):
+        return "Revision is not valid."
+    return _git(root, ["git", "show", "--stat", "--format=%h %ad %s", "--date=short", rev])
+
+
+def run_tests(root: Path, path: str | None = None) -> str:
+    """Run pytest. The model may name a file or directory inside the workspace and nothing else."""
+    command = [sys.executable, "-m", "pytest", "-q", "--tb=line"]
+    if path:
+        try:
+            relative = _optional_path(root, path)
+        except PermissionError as exc:
+            return str(exc)
+        if relative is None:
+            return "Path is required."
+        target = root / relative
+        if target.suffix.lower() not in {"", ".py"}:
+            return "Tests must be a directory or a Python file."
+        command.append(relative)
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"pytest failed: {exc}"
+    output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+    return output[:4000] or f"pytest exited {completed.returncode}"
 
 
 def jira_get_issue(issue_key: str, *, client=None) -> str:
