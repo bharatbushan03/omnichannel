@@ -10,6 +10,7 @@ to the assembled context after fusion, not blended into the ranking.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 
 from rank_bm25 import BM25Okapi
@@ -70,15 +71,38 @@ class HybridRetriever:
         graph_store: GraphStore,
         embedder: Embedder,
         bm25_corpus: dict[str, str] | None = None,  # chunk_id -> text, in-memory BM25 index
+        audit_log=None,
+        acl_store=None,
+        audit_fail_closed: bool | None = None,
     ):
         self.vector_store = vector_store
         self.graph_store = graph_store
         self.embedder = embedder
+        self.audit_log = audit_log
+        self.acl_store = acl_store
+        if audit_fail_closed is None:
+            audit_fail_closed = os.environ.get("AUDIT_FAIL_CLOSED", "false").lower() in ("1", "true", "yes")
+        self.audit_fail_closed = audit_fail_closed
         self._bm25_corpus = bm25_corpus or {}
         self._bm25_index: BM25Okapi | None = None
         self._bm25_ids: list[str] = []
         if self._bm25_corpus:
             self._build_bm25()
+
+    def _shared_channels(self, workspace_id: str, user_ids: list[str]) -> list[str]:
+        """Intersect channel membership. Any lookup failure returns no channels."""
+        if self.acl_store is None:
+            logger.error("ACL store is not configured; refusing channel-scoped retrieval")
+            return []
+        shared: set[str] | None = None
+        for user_id in user_ids:
+            try:
+                allowed = set(self.acl_store.get_allowed_channels(workspace_id, user_id))
+            except Exception:
+                logger.exception("ACL lookup failed for %s; fail closed", user_id)
+                return []
+            shared = allowed if shared is None else shared & allowed
+        return sorted(shared or [])
 
     def _build_bm25(self) -> None:
         self._bm25_ids = list(self._bm25_corpus.keys())
@@ -99,7 +123,31 @@ class HybridRetriever:
         allowed_channel_ids: list[str] | None = None,
         graph_entity_hint: str | None = None,
         limit: int = 10,
+        user_id: str | None = None,
+        participant_user_ids: list[str] | None = None,
+        source_interface: str = "voice",
     ) -> AssembledContext:
+        user_ids = list(participant_user_ids or [])
+        if not user_ids and user_id:
+            user_ids = [user_id]
+        if allowed_channel_ids is None and user_ids:
+            allowed_channel_ids = self._shared_channels(workspace_id, user_ids)
+
+        # An empty channel list is "no access", not "search everything". Skip
+        # both the vector store and the graph so a failed ACL lookup cannot
+        # still return entity facts from the workspace.
+        if allowed_channel_ids is not None and len(allowed_channel_ids) == 0:
+            assembled = AssembledContext(chunks=[], graph=GraphContext())
+            self._write_audit(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                query_text=query,
+                channel_scope=[],
+                result_chunk_ids=[],
+                source_interface=source_interface,
+            )
+            return assembled
+
         # 1. Dense vector search — "query" mode, must match the "passage" mode
         # used when this content was embedded for storage, or retrieval accuracy drops.
         query_vector = self.embedder.embed_query(query)
@@ -147,4 +195,42 @@ class HybridRetriever:
         except Exception as e:  # noqa: BLE001 — retrieval must degrade gracefully, never crash the voice turn
             logger.warning("Graph traversal failed, continuing with vector-only context: %s", e)
 
-        return AssembledContext(chunks=chunks, graph=GraphContext(facts=graph_facts))
+        assembled = AssembledContext(chunks=chunks, graph=GraphContext(facts=graph_facts))
+        self._write_audit(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            query_text=query,
+            channel_scope=list(allowed_channel_ids or []),
+            result_chunk_ids=[chunk.chunk_id for chunk in assembled.chunks],
+            source_interface=source_interface,
+        )
+        return assembled
+
+    def _write_audit(
+        self,
+        *,
+        workspace_id: str,
+        user_id: str | None,
+        query_text: str,
+        channel_scope: list[str],
+        result_chunk_ids: list[str],
+        source_interface: str,
+    ) -> None:
+        if self.audit_log is None:
+            if self.audit_fail_closed:
+                raise RuntimeError("Retrieval audit log is required but not configured")
+            return
+        try:
+            self.audit_log.write_retrieval_audit(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                query_text=query_text,
+                channel_scope=channel_scope,
+                result_chunk_ids=result_chunk_ids,
+                source_interface=source_interface,
+            )
+        except Exception:
+            if self.audit_fail_closed:
+                logger.exception("Audit log write failed; withholding results")
+                raise
+            logger.exception("Audit log write failed")
