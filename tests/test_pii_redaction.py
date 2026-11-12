@@ -27,6 +27,19 @@ def test_no_false_positive_on_plain_text():
     assert result.redaction_count == 0
 
 
+def test_version_string_is_not_an_ip_and_ticket_ids_are_not_cards():
+    r = PIIRedactor()
+    version = r.redact("version 1.2.3.4 of the agent")
+    assert version.redacted_text == "version 1.2.3.4 of the agent"
+    ticket = r.redact("ticket 1234567890123 opened")
+    assert "1234567890123" in ticket.redacted_text
+    card = r.redact("card 4111111111111111 on file")
+    assert "4111111111111111" not in card.redacted_text
+    assert "[REDACTED_CREDIT_CARD]" in card.redacted_text
+    ip = r.redact("IP 10.1.2.3 in the vpc")
+    assert "10.1.2.3" not in ip.redacted_text
+
+
 def test_hash_is_deterministic():
     r = PIIRedactor()
     result1 = r.redact("same input")
