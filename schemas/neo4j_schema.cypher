@@ -10,27 +10,37 @@
 // on it in application queries, constraints alone do not enforce isolation.
 // =============================================================
 
-// ---- Constraints (uniqueness + existence) ----
-CREATE CONSTRAINT project_id IF NOT EXISTS
-FOR (p:Project) REQUIRE p.id IS UNIQUE;
+// ---- Constraints ----
+// Entity ids are only unique inside a workspace. A global id constraint merges
+// "payments-service" from two companies into one node.
+DROP CONSTRAINT project_id IF EXISTS;
+DROP CONSTRAINT issue_id IF EXISTS;
+DROP CONSTRAINT deployscript_id IF EXISTS;
+DROP CONSTRAINT person_id IF EXISTS;
+DROP CONSTRAINT decision_id IF EXISTS;
+DROP CONSTRAINT document_id IF EXISTS;
+DROP CONSTRAINT meeting_id IF EXISTS;
 
-CREATE CONSTRAINT issue_id IF NOT EXISTS
-FOR (i:Issue) REQUIRE i.id IS UNIQUE;
+CREATE CONSTRAINT project_workspace_id IF NOT EXISTS
+FOR (p:Project) REQUIRE (p.workspace_id, p.id) IS UNIQUE;
 
-CREATE CONSTRAINT deployscript_id IF NOT EXISTS
-FOR (d:DeployScript) REQUIRE d.id IS UNIQUE;
+CREATE CONSTRAINT issue_workspace_id IF NOT EXISTS
+FOR (i:Issue) REQUIRE (i.workspace_id, i.id) IS UNIQUE;
 
-CREATE CONSTRAINT person_id IF NOT EXISTS
-FOR (p:Person) REQUIRE p.id IS UNIQUE;
+CREATE CONSTRAINT deployscript_workspace_id IF NOT EXISTS
+FOR (d:DeployScript) REQUIRE (d.workspace_id, d.id) IS UNIQUE;
 
-CREATE CONSTRAINT decision_id IF NOT EXISTS
-FOR (d:Decision) REQUIRE d.id IS UNIQUE;
+CREATE CONSTRAINT person_workspace_id IF NOT EXISTS
+FOR (p:Person) REQUIRE (p.workspace_id, p.id) IS UNIQUE;
 
-CREATE CONSTRAINT document_id IF NOT EXISTS
-FOR (doc:Document) REQUIRE doc.id IS UNIQUE;
+CREATE CONSTRAINT decision_workspace_id IF NOT EXISTS
+FOR (d:Decision) REQUIRE (d.workspace_id, d.id) IS UNIQUE;
 
-CREATE CONSTRAINT meeting_id IF NOT EXISTS
-FOR (m:Meeting) REQUIRE m.id IS UNIQUE;
+CREATE CONSTRAINT document_workspace_id IF NOT EXISTS
+FOR (doc:Document) REQUIRE (doc.workspace_id, doc.id) IS UNIQUE;
+
+CREATE CONSTRAINT meeting_workspace_id IF NOT EXISTS
+FOR (m:Meeting) REQUIRE (m.workspace_id, m.id) IS UNIQUE;
 
 CREATE CONSTRAINT workspace_id IF NOT EXISTS
 FOR (w:Workspace) REQUIRE w.id IS UNIQUE;
@@ -74,13 +84,13 @@ CREATE INDEX person_email IF NOT EXISTS FOR (p:Person) ON (p.email);
 
 MERGE (w:Workspace {id: $workspace_id})
 
-MERGE (proj:Project {id: $project_id})
+MERGE (proj:Project {id: $project_id, workspace_id: $workspace_id})
   ON CREATE SET proj.name = $project_name,
                 proj.workspace_id = $workspace_id,
                 proj.created_at = datetime()
 MERGE (proj)-[:BELONGS_TO]->(w)
 
-MERGE (issue:Issue {id: $issue_id})
+MERGE (issue:Issue {id: $issue_id, workspace_id: $workspace_id})
   ON CREATE SET issue.title = $issue_title,
                 issue.workspace_id = $workspace_id,
                 issue.status = 'open',
@@ -89,13 +99,13 @@ MERGE (issue:Issue {id: $issue_id})
                 issue.source_chunk_id = $source_chunk_id
 MERGE (proj)-[:HAS_ISSUE]->(issue)
 
-MERGE (reporter:Person {id: $reporter_id})
+MERGE (reporter:Person {id: $reporter_id, workspace_id: $workspace_id})
   ON CREATE SET reporter.display_name = $reporter_name,
                 reporter.workspace_id = $workspace_id
 MERGE (reporter)-[:REPORTED]->(issue)
 
 // Later, when a resolution is detected in a follow-up message:
-MERGE (script:DeployScript {id: $script_id})
+MERGE (script:DeployScript {id: $script_id, workspace_id: $workspace_id})
   ON CREATE SET script.name = $script_name,
                 script.workspace_id = $workspace_id,
                 script.repo_path = $repo_path
