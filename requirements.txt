@@ -11,6 +11,7 @@ python-dotenv>=1.0.0
 qdrant-client>=1.11.0
 neo4j>=5.24.0
 asyncpg>=0.29.0
+psycopg[binary]>=3.2.0
 rank-bm25>=0.2.2
 
 # Voice agent (LiveKit)
@@ -20,8 +21,9 @@ livekit-plugins-cartesia>=0.4.0
 livekit-plugins-silero>=0.6.0
 livekit-plugins-openai>=0.10.0
 
-# Ingestion
+# Ingestion and channel agents
 slack-sdk>=3.31.0
+PyNaCl>=1.5.0
 
 # Dev / test
 pytest>=8.3.0
