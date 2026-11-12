@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS retrieval_audit_log (
     query_text      TEXT NOT NULL,
     channel_scope   TEXT[],
     result_chunk_ids TEXT[],
-    source_interface TEXT NOT NULL CHECK (source_interface IN ('slack', 'teams', 'voice')),
+    source_interface TEXT NOT NULL CHECK (source_interface IN (
+        'slack', 'teams', 'voice', 'discord', 'whatsapp', 'jira', 'zoom', 'google_meet', 'teams_meeting'
+    )),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -50,5 +52,14 @@ CREATE TABLE IF NOT EXISTS meeting_consent_log (
     meeting_id      TEXT NOT NULL,
     announced_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     objection_raised BOOLEAN NOT NULL DEFAULT false,
-    recording_stopped_at TIMESTAMPTZ
+    recording_stopped_at TIMESTAMPTZ,
+    jurisdiction    TEXT,
+    disclosure_text TEXT,
+    objection_speaker TEXT,
+    policy_action   TEXT,
+    objection_at    TIMESTAMPTZ,
+    excluded_speakers TEXT[]
 );
+
+CREATE INDEX IF NOT EXISTS idx_consent_meeting
+    ON meeting_consent_log (workspace_id, meeting_id, announced_at DESC);
