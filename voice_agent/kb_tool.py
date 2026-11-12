@@ -13,7 +13,7 @@ import logging
 
 from ingestion.embedder import Embedder
 from ingestion.hybrid_retrieval import HybridRetriever
-from ingestion.storage_clients import GraphStore, VectorStore
+from ingestion.storage_clients import GraphStore, PostgresStore, VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +30,13 @@ def init_kb_clients() -> None:
     _vector_store = VectorStore()
     _graph_store = GraphStore()
     _embedder = Embedder()
+    governance = PostgresStore()
     _retriever = HybridRetriever(
         vector_store=_vector_store,
         graph_store=_graph_store,
         embedder=_embedder,
+        audit_log=governance,
+        acl_store=governance,
     )
 
 
@@ -41,6 +44,9 @@ async def query_knowledge_base(
     query: str,
     workspace_id: str,
     allowed_channel_ids: list[str] | None = None,
+    user_id: str | None = None,
+    participant_user_ids: list[str] | None = None,
+    source_interface: str = "voice",
 ) -> str:
     """Query the hybrid knowledge base (vector + graph) and return an
     assembled context string ready to inject into the LLM's next turn.
@@ -48,9 +54,16 @@ async def query_knowledge_base(
     Args:
         query: The natural-language question to search for.
         workspace_id: Tenant scope — never omit this, it is the access boundary.
-        allowed_channel_ids: If the calling user's channel membership is known,
-            pass it to further restrict retrieval. None means workspace-wide
-            (only appropriate for workspace-level admin/broadcast contexts).
+        allowed_channel_ids: Channel ids the caller may read. None with a
+            user_id (or participant_user_ids) resolves membership from Postgres
+            and uses the intersection across participants. None with no user is
+            workspace-wide, only for an admin or broadcast context.
+        user_id: Caller recorded on the audit row and used for ACL when no
+            channel list is supplied.
+        participant_user_ids: When set, retrieval is limited to channels every
+            listed user can access.
+        source_interface: ``voice``, ``slack``, ``teams``, ``discord``, ``whatsapp``,
+            ``jira``, ``zoom``, ``google_meet``, or ``teams_meeting``.
 
     Returns:
         A formatted context string (chunks + graph facts) or a
@@ -64,6 +77,9 @@ async def query_knowledge_base(
             query=query,
             workspace_id=workspace_id,
             allowed_channel_ids=allowed_channel_ids,
+            user_id=user_id,
+            participant_user_ids=participant_user_ids,
+            source_interface=source_interface,
             limit=6,
         )
     except Exception:  # noqa: BLE001 — a failed lookup must not crash the live voice turn

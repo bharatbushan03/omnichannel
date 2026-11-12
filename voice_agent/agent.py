@@ -45,8 +45,15 @@ from livekit.agents import (
 )
 from livekit.plugins import cartesia, deepgram, openai as lk_openai, silero
 
+from dotenv import load_dotenv
+
 from ingestion.nvidia_client import DEFAULT_CHAT_MODEL, NVIDIA_BASE_URL
+from security.consent import DISCLOSURE_TEXT
+from security.encryption import require_encryption_at_rest
 from voice_agent.kb_tool import init_kb_clients, query_knowledge_base
+from voice_agent.scope import RoomScope, parse_room_metadata
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voice-knowledge-agent")
@@ -74,10 +81,9 @@ def prewarm(proc: JobProcess) -> None:
 
 
 class KnowledgeAgent(Agent):
-    def __init__(self, workspace_id: str, allowed_channel_ids: list[str] | None) -> None:
+    def __init__(self, scope: RoomScope) -> None:
         super().__init__(instructions=AGENT_INSTRUCTIONS)
-        self.workspace_id = workspace_id
-        self.allowed_channel_ids = allowed_channel_ids
+        self.scope = scope
 
     @function_tool()
     async def lookup_knowledge_base(self, context: RunContext, query: str) -> str:
@@ -91,18 +97,21 @@ class KnowledgeAgent(Agent):
         logger.info("KB tool called: %s", query)
         return await query_knowledge_base(
             query=query,
-            workspace_id=self.workspace_id,
-            allowed_channel_ids=self.allowed_channel_ids,
+            workspace_id=self.scope.workspace_id,
+            allowed_channel_ids=self.scope.allowed_channel_ids,
+            user_id=self.scope.user_id,
+            participant_user_ids=self.scope.participant_user_ids,
+            source_interface="voice",
         )
 
 
 async def entrypoint(ctx: JobContext) -> None:
+    require_encryption_at_rest()
     await ctx.connect()
 
-    # workspace_id should come from room metadata set when the room was created
-    # (i.e. when your backend dispatched this agent to a specific company call).
-    # Falling back to a placeholder here so the script is runnable standalone.
-    workspace_id = ctx.room.metadata or "ws_demo"
+    # workspace_id, user ids, and channel scope come from room metadata set when
+    # the backend dispatched this agent. A plain string is still a workspace id.
+    scope = parse_room_metadata(ctx.room.metadata)
 
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
@@ -122,15 +131,18 @@ async def entrypoint(ctx: JobContext) -> None:
         # `turn_detector.EOUModel` if VAD-only endpointing clips users too eagerly.
     )
 
-    agent = KnowledgeAgent(workspace_id=workspace_id, allowed_channel_ids=None)
+    agent = KnowledgeAgent(scope=scope)
 
     await session.start(agent=agent, room=ctx.room)
 
-    # Greet on join so participants know the agent is live (also serves as a
-    # lightweight consent/disclosure notice — see security/governance.md).
+    # Spoken disclosure on join. The sentence is fixed so the consent log and
+    # the voice greeting match. See security/governance.md.
     await session.generate_reply(
-        instructions="Greet the team briefly and let them know you can answer "
-        "questions about past decisions, incidents, and docs during this call."
+        instructions=(
+            "Say this disclosure verbatim, then one short sentence that you can "
+            "answer questions about past decisions, incidents, and docs during "
+            f"this call: {DISCLOSURE_TEXT}"
+        )
     )
 
 
