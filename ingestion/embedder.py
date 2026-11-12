@@ -38,6 +38,10 @@ def chunk_text(text: str, max_chars: int = 800, overlap_chars: int = 100) -> lis
     """Simple sliding-window chunker. For production, prefer a sentence-boundary-aware
     splitter (e.g. langchain's RecursiveCharacterTextSplitter) — this keeps the
     dependency footprint minimal for the scaffold."""
+    if max_chars < 1:
+        raise ValueError("max_chars must be at least 1")
+    # Overlap must be smaller than the window or the cursor never advances.
+    overlap_chars = max(0, min(overlap_chars, max_chars - 1))
     if len(text) <= max_chars:
         return [TextChunk(text=text, chunk_index=0, token_estimate=len(text) // 4)]
 
@@ -54,7 +58,12 @@ def chunk_text(text: str, max_chars: int = 800, overlap_chars: int = 100) -> lis
         if chunk:
             chunks.append(TextChunk(text=chunk, chunk_index=idx, token_estimate=len(chunk) // 4))
             idx += 1
-        start = end - overlap_chars if end < len(text) else end
+        next_start = end - overlap_chars if end < len(text) else end
+        if next_start <= start:
+            next_start = end
+        if next_start <= start:
+            break
+        start = next_start
     return chunks
 
 
